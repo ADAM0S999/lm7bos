@@ -675,12 +675,20 @@ API_MODE="false"`;
                     </div>
                     <div className="flex items-center gap-3">
                       <div className="w-5 h-5 rounded-md bg-[#1c1c24] border border-zinc-700/80 flex items-center justify-center font-bold text-[11px] text-white shrink-0">2</div>
-                      <span>Tap &quot;Link with phone instead&quot;</span>
+                      <span>Tap &quot;Link with phone instead&quot; (at bottom of QR scanner)</span>
                     </div>
                     <div className="flex items-center gap-3">
                       <div className="w-5 h-5 rounded-md bg-[#1c1c24] border border-zinc-700/80 flex items-center justify-center font-bold text-[11px] text-white shrink-0">3</div>
                       <span>Enter the 8-character code</span>
                     </div>
+                  </div>
+
+                  {/* Notification tip */}
+                  <div className="p-3 bg-amber-950/30 border border-amber-800/40 rounded-xl text-[11px] font-mono text-amber-300/90 text-left flex items-start gap-2.5">
+                    <span className="text-sm shrink-0">💡</span>
+                    <span>
+                      <strong>Didn&apos;t get a notification?</strong> Open WhatsApp &rarr; <strong>Settings</strong> &rarr; <strong>Linked Devices</strong> &rarr; <strong>Link a device</strong> &rarr; tap <strong>&quot;Link with phone number instead&quot;</strong> at the bottom of the camera screen, then type this code!
+                    </span>
                   </div>
 
                   {/* Bottom Connection Status / Finalizing Pill */}
