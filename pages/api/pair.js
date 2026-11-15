@@ -19,6 +19,23 @@ function generateSessionId(customName = null) {
   return `${prefix}_adjacency${randomPart}`;
 }
 
+// Sanitize international phone numbers (specifically handles Morocco 21206 -> 2126)
+function sanitizePhoneNumber(raw) {
+  let clean = String(raw || '').replace(/[^0-9]/g, '');
+  if (clean.startsWith('00')) {
+    clean = clean.slice(2);
+  }
+  // Morocco fix: if entered with 0 after 212 (e.g. 21206... or 21207... or 21205...)
+  if (clean.startsWith('2120') && clean.length >= 12) {
+    clean = '212' + clean.slice(4);
+  }
+  // If user entered local Moroccan number without country code (06... or 07...)
+  if ((clean.startsWith('06') || clean.startsWith('07') || clean.startsWith('05')) && clean.length === 10) {
+    clean = '212' + clean.slice(1);
+  }
+  return clean;
+}
+
 export default async function handler(req, res) {
   // ── GET: Check connection status for real-time login (polling fallback) ──
   if (req.method === 'GET') {
@@ -55,7 +72,7 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Phone number is required' });
   }
 
-  number = String(number).replace(/[^0-9]/g, '');
+  const cleanNumber = sanitizePhoneNumber(number);
   const finalSessionId = sessionId || generateSessionId(sessionName);
   const isSse = stream || req.headers['accept']?.includes('text/event-stream');
 
@@ -83,7 +100,8 @@ export default async function handler(req, res) {
     sendEvent({
       status: 'INIT',
       message: 'Connecting to WhatsApp servers…',
-      sessionId: finalSessionId
+      sessionId: finalSessionId,
+      number: cleanNumber
     });
 
     let sock = null;
@@ -116,22 +134,49 @@ export default async function handler(req, res) {
     try {
       const baileys = await import('@whiskeysockets/baileys');
       const makeWASocket = baileys.default || baileys.makeWASocket;
-      const { useMultiFileAuthState, Browsers, delay, DisconnectReason } = baileys;
+      const { 
+        useMultiFileAuthState, 
+        delay, 
+        DisconnectReason,
+        fetchLatestBaileysVersion,
+        makeCacheableSignalKeyStore 
+      } = baileys;
+
       const pino = (await import('pino')).default;
+      const NodeCache = (await import('node-cache')).default;
       const os = await import('os');
       const path = await import('path');
 
-      tempDir = path.join(os.tmpdir(), `adam_auth_${number}_${Date.now()}`);
+      tempDir = path.join(os.tmpdir(), `adam_auth_${cleanNumber}_${Date.now()}`);
       const { state, saveCreds } = await useMultiFileAuthState(tempDir);
       const logger = pino({ level: 'silent' });
 
+      // Fetch latest WhatsApp Web version to prevent "Couldn't link device" protocol mismatches
+      let version = [2, 3000, 1015901307];
+      try {
+        const v = await fetchLatestBaileysVersion();
+        if (v?.version) version = v.version;
+      } catch (e) {}
+
+      const msgRetryCounterCache = new NodeCache();
+
       sock = makeWASocket({
-        auth: state,
+        version,
         logger,
         printQRInTerminal: false,
-        browser: Browsers.macOS('Desktop'),
+        // Canonical Ubuntu Chrome browser signature required for WhatsApp pairing code
+        browser: ['Ubuntu', 'Chrome', '20.0.04'],
+        auth: {
+          creds: state.creds,
+          keys: makeCacheableSignalKeyStore ? makeCacheableSignalKeyStore(state.keys, logger) : state.keys,
+        },
+        msgRetryCounterCache,
+        generateHighQualityLinkPreview: false,
         markOnlineOnConnect: false,
         syncFullHistory: false,
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 0,
+        keepAliveIntervalMs: 10000,
       });
 
       sock.ev.on('creds.update', saveCreds);
@@ -141,14 +186,13 @@ export default async function handler(req, res) {
         const { connection, lastDisconnect } = update;
 
         if (connection === 'open') {
-          console.log(`[ADAM] WhatsApp connected successfully for ${number}`);
+          console.log(`[ADAM] WhatsApp connected successfully for ${cleanNumber}`);
           sendEvent({
             status: 'CONNECTED',
             message: 'CONNECTED. FINALIZING...',
             sessionId: finalSessionId
           });
 
-          // Wait 2 seconds for creds to write
           await delay(2000);
 
           let b64Session = finalSessionId;
@@ -187,10 +231,10 @@ export default async function handler(req, res) {
         }
       });
 
-      // Wait 3 seconds for handshake
+      // Wait 3 seconds for WebSocket baseline
       await delay(3000);
 
-      const rawCode = await sock.requestPairingCode(number);
+      const rawCode = await sock.requestPairingCode(cleanNumber);
       const cleanCode = rawCode ? String(rawCode).replace(/[^a-zA-Z0-9]/g, '').toUpperCase() : '';
       const formatted = cleanCode.length === 8 
         ? `${cleanCode.slice(0, 4)} - ${cleanCode.slice(4)}`
@@ -234,22 +278,47 @@ export default async function handler(req, res) {
   try {
     const baileys = await import('@whiskeysockets/baileys');
     const makeWASocket = baileys.default || baileys.makeWASocket;
-    const { useMultiFileAuthState, Browsers, delay, DisconnectReason } = baileys;
+    const { 
+      useMultiFileAuthState, 
+      delay, 
+      DisconnectReason,
+      fetchLatestBaileysVersion,
+      makeCacheableSignalKeyStore 
+    } = baileys;
+
     const pino = (await import('pino')).default;
+    const NodeCache = (await import('node-cache')).default;
     const os = await import('os');
     const path = await import('path');
 
-    const tempDir = path.join(os.tmpdir(), `adam_auth_${number}_${Date.now()}`);
+    const tempDir = path.join(os.tmpdir(), `adam_auth_${cleanNumber}_${Date.now()}`);
     const { state, saveCreds } = await useMultiFileAuthState(tempDir);
     const logger = pino({ level: 'silent' });
 
+    let version = [2, 3000, 1015901307];
+    try {
+      const v = await fetchLatestBaileysVersion();
+      if (v?.version) version = v.version;
+    } catch (e) {}
+
+    const msgRetryCounterCache = new NodeCache();
+
     const sock = makeWASocket({
-      auth: state,
+      version,
       logger,
       printQRInTerminal: false,
-      browser: Browsers.macOS('Desktop'),
+      browser: ['Ubuntu', 'Chrome', '20.0.04'],
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore ? makeCacheableSignalKeyStore(state.keys, logger) : state.keys,
+      },
+      msgRetryCounterCache,
+      generateHighQualityLinkPreview: false,
       markOnlineOnConnect: false,
       syncFullHistory: false,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 0,
+      keepAliveIntervalMs: 10000,
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -257,7 +326,7 @@ export default async function handler(req, res) {
     const sessionRecord = {
       sock,
       status: 'WAITING',
-      number,
+      number: cleanNumber,
       sessionId: finalSessionId,
       createdAt: Date.now()
     };
@@ -278,7 +347,7 @@ export default async function handler(req, res) {
 
     await delay(3000);
 
-    const code = await sock.requestPairingCode(number);
+    const code = await sock.requestPairingCode(cleanNumber);
     const cleanCode = code ? String(code).replace(/[^a-zA-Z0-9]/g, '').toUpperCase() : '';
     const formatted = cleanCode.length === 8 
       ? `${cleanCode.slice(0, 4)} - ${cleanCode.slice(4)}`
@@ -286,7 +355,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       ok: true,
-      number,
+      number: cleanNumber,
       sessionId: finalSessionId,
       code: cleanCode || formatted,
       formattedCode: formatted,

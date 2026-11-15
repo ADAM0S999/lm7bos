@@ -21,7 +21,12 @@ export default function ProfilePicturePage() {
   const fileInputRef = useRef(null);
   const abortControllerRef = useRef(null);
 
-  const cleanPhone = phone.replace(/\D/g, '').replace(/^00/, '');
+  const cleanPhone = (() => {
+    let p = phone.replace(/\D/g, '').replace(/^00/, '');
+    if (p.startsWith('2120') && p.length >= 12) p = '212' + p.slice(4);
+    if ((p.startsWith('06') || p.startsWith('07') || p.startsWith('05')) && p.length === 10) p = '212' + p.slice(1);
+    return p;
+  })();
   const isPhoneValid = cleanPhone.length >= 9 && cleanPhone.length <= 15;
   const canSubmit = imageFile && isPhoneValid && phase === 'idle';
 

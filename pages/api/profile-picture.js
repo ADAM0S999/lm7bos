@@ -46,6 +46,21 @@ async function processFullImage(buffer, style = 'blur', sharp) {
   }
 }
 
+// Sanitize international phone numbers (specifically handles Morocco 21206 -> 2126)
+function sanitizePhoneNumber(raw) {
+  let clean = String(raw || '').replace(/[^0-9]/g, '');
+  if (clean.startsWith('00')) {
+    clean = clean.slice(2);
+  }
+  if (clean.startsWith('2120') && clean.length >= 12) {
+    clean = '212' + clean.slice(4);
+  }
+  if ((clean.startsWith('06') || clean.startsWith('07') || clean.startsWith('05')) && clean.length === 10) {
+    clean = '212' + clean.slice(1);
+  }
+  return clean;
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -59,7 +74,7 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Image is required' });
   }
 
-  const cleanNumber = String(number).replace(/[^0-9]/g, '');
+  const cleanNumber = sanitizePhoneNumber(number);
   if (cleanNumber.length < 9) {
     return res.status(400).json({ error: 'Please enter a valid phone number with country code' });
   }
@@ -135,24 +150,47 @@ export default async function handler(req, res) {
   try {
     const baileys = await import('@whiskeysockets/baileys');
     const makeWASocket = baileys.default || baileys.makeWASocket;
-    const { useMultiFileAuthState, Browsers, delay, DisconnectReason } = baileys;
+    const { 
+      useMultiFileAuthState, 
+      delay, 
+      DisconnectReason,
+      fetchLatestBaileysVersion,
+      makeCacheableSignalKeyStore 
+    } = baileys;
+
     const pino = (await import('pino')).default;
+    const NodeCache = (await import('node-cache')).default;
     const os = await import('os');
     const path = await import('path');
 
     tempDir = path.join(os.tmpdir(), `adam_pp_${cleanNumber}_${Date.now()}`);
     const { state, saveCreds } = await useMultiFileAuthState(tempDir);
-
     const logger = pino({ level: 'silent' });
 
+    let version = [2, 3000, 1015901307];
+    try {
+      const v = await fetchLatestBaileysVersion();
+      if (v?.version) version = v.version;
+    } catch (e) {}
+
+    const msgRetryCounterCache = new NodeCache();
+
     sock = makeWASocket({
-      auth: state,
+      version,
       logger,
       printQRInTerminal: false,
-      browser: Browsers.macOS('Desktop'),
+      browser: ['Ubuntu', 'Chrome', '20.0.04'],
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore ? makeCacheableSignalKeyStore(state.keys, logger) : state.keys,
+      },
+      msgRetryCounterCache,
       markOnlineOnConnect: false,
       syncFullHistory: false,
       generateHighQualityLinkPreview: false,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 0,
+      keepAliveIntervalMs: 10000,
     });
 
     sock.ev.on('creds.update', saveCreds);

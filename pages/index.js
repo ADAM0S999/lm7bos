@@ -137,7 +137,13 @@ export default function Home() {
   };
 
   const handleRequestPairing = async () => {
-    const cleanPhone = phone.replace(/[^0-9]/g, '');
+    let cleanPhone = phone.replace(/[^0-9]/g, '');
+    if (cleanPhone.startsWith('00')) cleanPhone = cleanPhone.slice(2);
+    if (cleanPhone.startsWith('2120') && cleanPhone.length >= 12) cleanPhone = '212' + cleanPhone.slice(4);
+    if ((cleanPhone.startsWith('06') || cleanPhone.startsWith('07') || cleanPhone.startsWith('05')) && cleanPhone.length === 10) {
+      cleanPhone = '212' + cleanPhone.slice(1);
+    }
+
     if (!cleanPhone || cleanPhone.length < 9) {
       alert('Please enter a valid phone number with country code (e.g. 212612345678)');
       return;
@@ -601,7 +607,7 @@ API_MODE="false"`;
                       type="tel"
                       value={phone}
                       onChange={(e) => setPhone(e.target.value)}
-                      placeholder="e.g. +1 234 567 8900"
+                      placeholder="e.g. 212612345678 (no leading 0)"
                       className="w-full bg-[#0c0c10] border border-zinc-800 rounded-xl pl-10 pr-4 py-3 text-sm text-white font-mono placeholder-zinc-600 focus:outline-none focus:border-red-500"
                     />
                   </div>
