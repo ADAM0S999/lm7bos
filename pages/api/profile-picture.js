@@ -1,7 +1,5 @@
 export const maxDuration = 60; // Allow up to 60 seconds on Vercel
 
-global._ppSessions = global._ppSessions || new Map();
-
 // Helper to process full image with sharp into a 1:1 canvas without cropping
 async function processFullImage(buffer, style = 'blur', sharp) {
   const metadata = await sharp(buffer).metadata();
@@ -49,52 +47,6 @@ async function processFullImage(buffer, style = 'blur', sharp) {
 }
 
 export default async function handler(req, res) {
-  // ── GET: Check Profile Picture Pairing / Update Status ──
-  if (req.method === 'GET') {
-    const { trackingId } = req.query;
-    if (!trackingId) {
-      return res.status(400).json({ error: 'trackingId is required' });
-    }
-
-    const session = global._ppSessions.get(trackingId);
-    if (!session) {
-      return res.status(200).json({
-        status: 'error',
-        message: 'Session expired or not found. Please try again.'
-      });
-    }
-
-    return res.status(200).json({
-      status: session.status || 'waiting',
-      message: session.message || '',
-      code: session.code || null,
-      formattedCode: session.formattedCode || null,
-      deviceRemoved: session.deviceRemoved || false
-    });
-  }
-
-  // ── DELETE / CANCEL: Cancel active profile picture request ──
-  if (req.method === 'DELETE' || (req.method === 'POST' && req.body?.action === 'cancel')) {
-    const trackingId = req.query?.trackingId || req.body?.trackingId;
-    if (trackingId && global._ppSessions.has(trackingId)) {
-      const session = global._ppSessions.get(trackingId);
-      try {
-        if (session.sock) {
-          session.sock.end(new Error('User cancelled'));
-        }
-      } catch (e) {}
-      try {
-        const fs = await import('fs');
-        if (session.tempDir && fs.existsSync(session.tempDir)) {
-          fs.rmSync(session.tempDir, { recursive: true, force: true });
-        }
-      } catch (e) {}
-      global._ppSessions.delete(trackingId);
-    }
-    return res.status(200).json({ ok: true, cancelled: true });
-  }
-
-  // ── POST: Start Profile Picture Update ──
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -125,7 +77,60 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Image size exceeds 5 MB limit.' });
   }
 
-  const trackingId = `pp_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+  // Set SSE streaming headers so Vercel keeps the connection and WebSocket ALIVE!
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no'
+  });
+
+  const sendEvent = (data) => {
+    try {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    } catch (e) {}
+  };
+
+  // Heartbeat to prevent proxy / Vercel idle timeouts
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(': keepalive\n\n');
+    } catch (e) {}
+  }, 3000);
+
+  sendEvent({
+    status: 'waiting',
+    message: 'Starting secure connection to WhatsApp…'
+  });
+
+  let sock = null;
+  let tempDir = null;
+
+  const cleanup = async () => {
+    clearInterval(heartbeat);
+    if (sock) {
+      try {
+        await sock.logout();
+      } catch (e) {}
+      try {
+        sock.end();
+      } catch (e) {}
+      sock = null;
+    }
+    if (tempDir) {
+      try {
+        const fs = await import('fs');
+        if (fs.existsSync(tempDir)) {
+          fs.rmSync(tempDir, { recursive: true, force: true });
+        }
+      } catch (e) {}
+      tempDir = null;
+    }
+  };
+
+  req.on('close', () => {
+    cleanup();
+  });
 
   try {
     const baileys = await import('@whiskeysockets/baileys');
@@ -135,93 +140,87 @@ export default async function handler(req, res) {
     const os = await import('os');
     const path = await import('path');
 
-    const tempDir = path.join(os.tmpdir(), `adam_pp_${cleanNumber}_${Date.now()}`);
+    tempDir = path.join(os.tmpdir(), `adam_pp_${cleanNumber}_${Date.now()}`);
     const { state, saveCreds } = await useMultiFileAuthState(tempDir);
 
     const logger = pino({ level: 'silent' });
 
-    const sock = makeWASocket({
+    sock = makeWASocket({
       auth: state,
       logger,
       printQRInTerminal: false,
-      browser: Browsers.ubuntu('Chrome'),
+      browser: Browsers.macOS('Desktop'),
       markOnlineOnConnect: false,
+      syncFullHistory: false,
       generateHighQualityLinkPreview: false,
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    const sessionRecord = {
-      sock,
-      status: 'waiting',
-      message: 'Requesting your pairing code…',
-      code: null,
-      formattedCode: null,
-      number: cleanNumber,
-      trackingId,
-      tempDir,
-      imageBuffer,
-      style,
-      deviceRemoved: false,
-      createdAt: Date.now()
-    };
-    global._ppSessions.set(trackingId, sessionRecord);
-
-    // Handle connection update and automatic profile picture replacement
+    // Active listener for WhatsApp connection
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect } = update;
-      const current = global._ppSessions.get(trackingId);
-      if (!current) return;
 
       if (connection === 'open') {
-        current.status = 'working';
-        current.message = 'Linked successfully. Processing full image…';
+        sendEvent({
+          status: 'working',
+          message: 'Linked successfully! Processing full resolution image…'
+        });
 
         try {
-          // Process image using sharp
           let processedBuffer;
           try {
             const sharpModule = await import('sharp');
             const sharp = sharpModule.default || sharpModule;
-            processedBuffer = await processFullImage(current.imageBuffer, current.style, sharp);
+            processedBuffer = await processFullImage(imageBuffer, style, sharp);
           } catch (sharpError) {
-            console.warn('[ProfilePicture] sharp fallback to original buffer:', sharpError.message);
-            processedBuffer = current.imageBuffer;
+            console.warn('[ProfilePicture] sharp fallback:', sharpError.message);
+            processedBuffer = imageBuffer;
           }
 
-          current.message = 'Updating WhatsApp profile picture…';
+          sendEvent({
+            status: 'working',
+            message: 'Updating WhatsApp profile picture…'
+          });
 
-          // Update profile picture for the logged-in user
           await sock.updateProfilePicture(sock.user.id, processedBuffer);
 
-          current.status = 'success';
-          current.message = 'Profile picture updated successfully!';
-          current.deviceRemoved = true;
+          sendEvent({
+            status: 'success',
+            message: 'Profile picture updated successfully!',
+            deviceRemoved: true
+          });
 
-          // Automatically clean up temporary linked device after 3 seconds
+          // Wait 3 seconds then cleanly close and logout
           setTimeout(async () => {
+            await cleanup();
             try {
-              await sock.logout();
+              res.end();
             } catch (e) {}
-            try {
-              const fs = await import('fs');
-              if (fs.existsSync(current.tempDir)) {
-                fs.rmSync(current.tempDir, { recursive: true, force: true });
-              }
-            } catch (e) {}
-            global._ppSessions.delete(trackingId);
-          }, 4000);
+          }, 3000);
 
         } catch (err) {
-          console.error('[ProfilePicture] Error updating profile picture:', err);
-          current.status = 'error';
-          current.message = err.message || 'Failed to update profile picture. Please try again.';
+          console.error('[ProfilePicture] Update error:', err);
+          sendEvent({
+            status: 'error',
+            message: err.message || 'Failed to update profile picture. Please try again.'
+          });
+          await cleanup();
+          try {
+            res.end();
+          } catch (e) {}
         }
       } else if (connection === 'close') {
         const code = lastDisconnect?.error?.output?.statusCode;
-        if (code === DisconnectReason.loggedOut && current.status !== 'success') {
-          current.status = 'error';
-          current.message = 'Connection was closed or logged out. Please try again.';
+        if (code === DisconnectReason.loggedOut) {
+          sendEvent({
+            status: 'error',
+            message: 'Device was disconnected or logged out. Please try again.'
+          });
+          await cleanup();
+          try {
+            res.end();
+          } catch (e) {}
         }
       }
     });
@@ -229,28 +228,46 @@ export default async function handler(req, res) {
     // Wait 3 seconds for handshake
     await delay(3000);
 
+    sendEvent({
+      status: 'waiting',
+      message: 'Requesting pairing code from WhatsApp…'
+    });
+
     const rawCode = await sock.requestPairingCode(cleanNumber);
     const cleanCode = rawCode ? String(rawCode).replace(/[^a-zA-Z0-9]/g, '').toUpperCase() : '';
     const formatted = cleanCode.length === 8 
       ? `${cleanCode.slice(0, 4)} - ${cleanCode.slice(4)}`
       : cleanCode;
 
-    sessionRecord.status = 'code';
-    sessionRecord.code = cleanCode;
-    sessionRecord.formattedCode = formatted;
-    sessionRecord.message = 'Enter this code in WhatsApp';
-
-    return res.status(200).json({
-      ok: true,
-      trackingId,
+    // Send code to client - but keep the stream OPEN while waiting for user to type code!
+    sendEvent({
+      status: 'code',
       code: cleanCode,
       formattedCode: formatted,
       message: 'Enter this code in WhatsApp'
     });
+
+    // Safety timeout at 55 seconds (before Vercel 60s limit)
+    setTimeout(async () => {
+      sendEvent({
+        status: 'error',
+        message: 'Linking timed out (60s). Please make sure you tap "Link with phone instead" on your phone.'
+      });
+      await cleanup();
+      try {
+        res.end();
+      } catch (e) {}
+    }, 55000);
+
   } catch (err) {
-    return res.status(500).json({
-      ok: false,
-      error: err.message || 'Failed to request pairing code. If this keeps happening, try using a VPN.'
+    console.error('[ProfilePicture] Fatal error:', err);
+    sendEvent({
+      status: 'error',
+      message: err.message || 'Failed to request pairing code. If connection fails, try using a VPN.'
     });
+    await cleanup();
+    try {
+      res.end();
+    } catch (e) {}
   }
 }

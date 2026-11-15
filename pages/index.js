@@ -153,26 +153,67 @@ export default function Home() {
     try {
       const res = await fetch('/api/pair', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream'
+        },
         body: JSON.stringify({
           number: cleanPhone,
           sessionId: targetSessionId,
-          sessionName: useCustomSession ? customSessionName.trim() : null
+          sessionName: useCustomSession ? customSessionName.trim() : null,
+          stream: true
         }),
       });
-      const data = await res.json();
-      setLoading(false);
 
-      if (data.ok && data.code) {
-        setPairCode(data.code);
-        const finalSid = data.sessionId || targetSessionId;
-        setGeneratedSessionId(finalSid);
-        handleConfigChange('sessionId', finalSid);
-        startPolling(finalSid);
-      } else {
-        setPairError(data.error || 'Failed to request code. Please verify your phone number.');
-        setGeneratedSessionId(targetSessionId);
+      if (!res.ok) {
+        let errJson = {};
+        try { errJson = await res.json(); } catch(e) {}
+        setLoading(false);
+        setPairError(errJson.error || 'Failed to request code. Please verify your phone number.');
+        return;
       }
+
+      // Continuous SSE stream prevents Vercel serverless freeze while user types code!
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const blocks = buffer.split('\n\n');
+        buffer = blocks.pop() || '';
+
+        for (const block of blocks) {
+          const trimmed = block.trim();
+          if (trimmed.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(trimmed.replace(/^data:\s*/, ''));
+
+              if (data.status === 'CODE') {
+                setLoading(false);
+                setPairCode(data.formattedCode || data.code);
+                const finalSid = data.sessionId || targetSessionId;
+                setGeneratedSessionId(finalSid);
+                handleConfigChange('sessionId', finalSid);
+                setConnectionStatus('WAITING FOR WHATSAPP...');
+              } else if (data.status === 'CONNECTED') {
+                setConnectionStatus('CONNECTED. FINALIZING...');
+              } else if (data.status === 'FINALIZED') {
+                finalizeSession(data.b64SessionId || data.sessionId || targetSessionId);
+              } else if (data.status === 'ERROR') {
+                setLoading(false);
+                setPairError(data.message || 'An error occurred during pairing.');
+              }
+            } catch (err) {
+              console.error('SSE parse error:', err);
+            }
+          }
+        }
+      }
+      setLoading(false);
     } catch (e) {
       setLoading(false);
       setPairError(`Connection error: ${e.message}. If connection fails, try using a VPN.`);

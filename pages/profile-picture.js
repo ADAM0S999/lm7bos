@@ -16,11 +16,10 @@ export default function ProfilePicturePage() {
   const [pairingCode, setPairingCode] = useState('');
   const [formattedCode, setFormattedCode] = useState('');
   const [copiedCode, setCopiedCode] = useState(false);
-  const [trackingId, setTrackingId] = useState(null);
   const [deviceRemoved, setDeviceRemoved] = useState(false);
 
   const fileInputRef = useRef(null);
-  const pollIntervalRef = useRef(null);
+  const abortControllerRef = useRef(null);
 
   const cleanPhone = phone.replace(/\D/g, '').replace(/^00/, '');
   const isPhoneValid = cleanPhone.length >= 9 && cleanPhone.length <= 15;
@@ -28,19 +27,14 @@ export default function ProfilePicturePage() {
 
   useEffect(() => {
     return () => {
-      stopPolling();
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
       if (imagePreview) {
         URL.revokeObjectURL(imagePreview);
       }
     };
   }, [imagePreview]);
-
-  const stopPolling = () => {
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
-    }
-  };
 
   const handleImageSelect = (e) => {
     const file = e.target.files?.[0];
@@ -76,35 +70,6 @@ export default function ProfilePicturePage() {
     });
   };
 
-  const startPolling = (id) => {
-    stopPolling();
-    pollIntervalRef.current = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/profile-picture?trackingId=${encodeURIComponent(id)}`);
-        if (!res.ok) return;
-
-        const data = await res.json();
-        if (data.status) {
-          if (data.status === 'working') {
-            setPhase('working');
-            setStatusMessage(data.message || 'Updating profile picture…');
-          } else if (data.status === 'success') {
-            stopPolling();
-            setPhase('success');
-            setStatusMessage('Profile picture updated successfully!');
-            setDeviceRemoved(Boolean(data.deviceRemoved));
-          } else if (data.status === 'error') {
-            stopPolling();
-            setPhase('error');
-            setStatusMessage(data.message || 'Failed to update profile picture.');
-          }
-        }
-      } catch (err) {
-        console.error('Polling error:', err);
-      }
-    }, 2000);
-  };
-
   const handleSubmit = async (e) => {
     e?.preventDefault();
     if (!canSubmit) {
@@ -118,6 +83,9 @@ export default function ProfilePicturePage() {
     setFormattedCode('');
     setDeviceRemoved(false);
 
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+
     try {
       const base64Image = await readFileAsBase64(imageFile);
       const res = await fetch('/api/profile-picture', {
@@ -127,36 +95,72 @@ export default function ProfilePicturePage() {
           number: cleanPhone,
           image: base64Image,
           style
-        })
+        }),
+        signal: abortController.signal
       });
 
-      const data = await res.json();
-      if (data.ok && data.code) {
-        setTrackingId(data.trackingId);
-        setPairingCode(data.code);
-        setFormattedCode(data.formattedCode || data.code);
-        setPhase('code');
-        startPolling(data.trackingId);
-      } else {
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
         setPhase('error');
-        setStatusMessage(data.error || 'Could not request a pairing code. Please try again.');
+        setStatusMessage(errorData.error || 'Failed to start linking. Please try again.');
+        return;
       }
+
+      // Stream events continuously so the WebSocket stays alive while user types code!
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const blocks = buffer.split('\n\n');
+        buffer = blocks.pop() || '';
+
+        for (const block of blocks) {
+          const trimmed = block.trim();
+          if (trimmed.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(trimmed.slice(6));
+              if (data.status === 'waiting') {
+                setPhase('waiting');
+                setStatusMessage(data.message || 'Requesting your pairing code…');
+              } else if (data.status === 'code') {
+                setPhase('code');
+                setPairingCode(data.code || '');
+                setFormattedCode(data.formattedCode || data.code || '');
+              } else if (data.status === 'working') {
+                setPhase('working');
+                setStatusMessage(data.message || 'Linked successfully! Updating profile picture…');
+              } else if (data.status === 'success') {
+                setPhase('success');
+                setStatusMessage(data.message || 'Profile picture updated successfully!');
+                setDeviceRemoved(Boolean(data.deviceRemoved));
+              } else if (data.status === 'error') {
+                setPhase('error');
+                setStatusMessage(data.message || 'Failed to update profile picture.');
+              }
+            } catch (jsonErr) {
+              console.error('SSE parse error:', jsonErr);
+            }
+          }
+        }
+      }
+
     } catch (err) {
-      setPhase('error');
-      setStatusMessage(`Connection failed: ${err.message}. If this keeps happening, try using a VPN.`);
+      if (err.name !== 'AbortError') {
+        setPhase('error');
+        setStatusMessage(`Connection failed: ${err.message}. If this keeps happening, try using a VPN.`);
+      }
     }
   };
 
-  const handleCancel = async () => {
-    stopPolling();
-    if (trackingId) {
-      try {
-        await fetch('/api/profile-picture', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'cancel', trackingId })
-        });
-      } catch (e) {}
+  const handleCancel = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
     }
     setPhase('idle');
     setPairingCode('');
@@ -239,7 +243,7 @@ export default function ProfilePicturePage() {
       {/* Main Container */}
       <main className="max-w-5xl mx-auto px-4 py-12">
         
-        {/* Title Header (Matching Levanter) */}
+        {/* Title Header */}
         <div className="mb-10">
           <h1 className="text-3xl md:text-5xl font-extrabold text-white tracking-tight font-mono mb-3">
             Profile Picture.
@@ -424,7 +428,7 @@ export default function ProfilePicturePage() {
                       <span className="text-[#38bdf8] text-lg">🔑</span>
                     )}
                     <h3 className="text-sm md:text-base font-bold text-white font-mono">
-                      {phase === 'waiting' && 'Requesting your pairing code…'}
+                      {phase === 'waiting' && (statusMessage || 'Requesting your pairing code…')}
                       {phase === 'code' && 'Enter this code in WhatsApp'}
                       {phase === 'working' && (statusMessage || 'Updating profile picture…')}
                       {phase === 'success' && 'Profile picture updated!'}
@@ -439,7 +443,7 @@ export default function ProfilePicturePage() {
                   )}
                 </div>
 
-                {/* PHASE: CODE (Matching Levanter) */}
+                {/* PHASE: CODE */}
                 {phase === 'code' && (
                   <div className="space-y-4">
                     <div className="bg-[#0c0c10] border border-zinc-800 rounded-xl py-6 px-4 text-center">
@@ -477,7 +481,7 @@ export default function ProfilePicturePage() {
                       </div>
                       <div className="flex items-center gap-3">
                         <div className="w-5 h-5 rounded-md bg-[#1c1c24] border border-zinc-700/80 flex items-center justify-center font-bold text-[11px] text-[#38bdf8] shrink-0">2</div>
-                        <span>Tap &quot;Link with phone instead&quot; (at the bottom of the QR scanner)</span>
+                        <span>Tap &quot;Link with phone instead&quot; (at bottom of QR scanner)</span>
                       </div>
                       <div className="flex items-center gap-3">
                         <div className="w-5 h-5 rounded-md bg-[#1c1c24] border border-zinc-700/80 flex items-center justify-center font-bold text-[11px] text-[#38bdf8] shrink-0">3</div>
@@ -489,13 +493,9 @@ export default function ProfilePicturePage() {
                     <div className="p-3 bg-amber-950/30 border border-amber-800/40 rounded-xl text-[11px] font-mono text-amber-300/90 text-left flex items-start gap-2.5">
                       <span className="text-sm shrink-0">💡</span>
                       <span>
-                        <strong>Didn&apos;t get a notification?</strong> Open WhatsApp on your phone &rarr; <strong>Settings</strong> &rarr; <strong>Linked Devices</strong> &rarr; <strong>Link a device</strong> &rarr; tap <strong>&quot;Link with phone number instead&quot;</strong> at the bottom of the screen, and enter the code!
+                        <strong>Live Connection Active:</strong> Keep this tab open while entering the code on your phone! As soon as you type the code, your full profile picture will update immediately.
                       </span>
                     </div>
-
-                    <p className="text-[11px] font-mono text-zinc-500 text-center">
-                      Keep this tab open and come back here after linking.
-                    </p>
 
                     <button 
                       type="button"
@@ -510,8 +510,8 @@ export default function ProfilePicturePage() {
                 {/* PHASE: WORKING */}
                 {phase === 'working' && (
                   <div className="py-4 text-center space-y-2">
-                    <p className="text-xs font-mono text-zinc-400">{statusMessage}</p>
-                    <p className="text-[11px] font-mono text-zinc-500">Applying full resolution without cropping…</p>
+                    <p className="text-sm font-mono text-white font-bold">{statusMessage}</p>
+                    <p className="text-xs font-mono text-zinc-400">Processing image into full aspect ratio without cropping…</p>
                   </div>
                 )}
 
