@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Head from 'next/head';
+import Link from 'next/link';
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState('session');
@@ -263,6 +264,12 @@ API_MODE="false"`;
             >
               🔑 Session
             </button>
+            <Link 
+              href="/profile-picture" 
+              className="px-3.5 py-1.5 rounded-lg font-medium transition hover:text-white"
+            >
+              🖼️ Profile Picture
+            </Link>
             <button 
               onClick={() => setActiveTab('deploy')} 
               className={`px-3.5 py-1.5 rounded-lg font-medium transition ${activeTab === 'deploy' ? 'bg-zinc-800 text-white' : 'hover:text-white'}`}
