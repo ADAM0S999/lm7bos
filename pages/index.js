@@ -14,11 +14,13 @@ export default function Home() {
   const [customSessionName, setCustomSessionName] = useState('');
   const [receiveOnWhatsApp, setReceiveOnWhatsApp] = useState(false);
 
-  // Recent Session State (Screenshot 2)
+  // Recent Session State
   const [recentSession, setRecentSession] = useState(null);
 
-  // Pairing state (Screenshot 1)
+  // Shared phone input (used by both QR and pair code)
   const [phone, setPhone] = useState('');
+
+  // Pairing code state
   const [loading, setLoading] = useState(false);
   const [pairCode, setPairCode] = useState('');
   const [generatedSessionId, setGeneratedSessionId] = useState('');
@@ -27,7 +29,14 @@ export default function Home() {
   const [pairError, setPairError] = useState('');
   const [connectionStatus, setConnectionStatus] = useState('WAITING FOR WHATSAPP...');
 
+  // QR code state
+  const [qrLoading, setQrLoading] = useState(false);
+  const [qrImage, setQrImage] = useState('');
+  const [qrError, setQrError] = useState('');
+  const [qrStatus, setQrStatus] = useState('');
+
   const pollingRef = useRef(null);
+  const qrReaderRef = useRef(null);
 
   // Load recent session on mount from localStorage
   useEffect(() => {
@@ -76,6 +85,74 @@ export default function Home() {
     if (pollingRef.current) {
       clearInterval(pollingRef.current);
       pollingRef.current = null;
+    }
+  };
+
+  const stopQr = () => {
+    if (qrReaderRef.current) {
+      try { qrReaderRef.current.cancel(); } catch(e) {}
+      qrReaderRef.current = null;
+    }
+  };
+
+  const handleStartQr = async () => {
+    setQrLoading(true);
+    setQrImage('');
+    setQrError('');
+    setQrStatus('Connecting to WhatsApp...');
+
+    try {
+      const res = await fetch('/api/qr', {
+        method: 'GET',
+        headers: { 'Accept': 'text/event-stream' },
+      });
+
+      if (!res.ok) {
+        setQrLoading(false);
+        setQrError('Failed to connect. Please try again.');
+        return;
+      }
+
+      const reader = res.body.getReader();
+      qrReaderRef.current = reader;
+      const decoder = new TextDecoder();
+      let buf = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const blocks = buf.split('\n\n');
+        buf = blocks.pop() || '';
+        for (const block of blocks) {
+          const trimmed = block.trim();
+          if (!trimmed.startsWith('data: ')) continue;
+          try {
+            const data = JSON.parse(trimmed.replace(/^data:\s*/, ''));
+            if (data.status === 'INIT') {
+              setQrStatus(data.message || 'Connecting...');
+            } else if (data.status === 'QR') {
+              setQrLoading(false);
+              setQrImage(data.qr);
+              setQrStatus('Scan this QR with WhatsApp');
+            } else if (data.status === 'CONNECTED') {
+              setQrStatus('CONNECTED. FINALIZING...');
+              setQrImage('');
+            } else if (data.status === 'FINALIZED') {
+              finalizeSession(data.b64SessionId || '');
+              setShowQrModal(false);
+            } else if (data.status === 'ERROR' || data.status === 'TIMEOUT') {
+              setQrLoading(false);
+              setQrError(data.message || 'QR expired. Please try again.');
+              setQrImage('');
+            }
+          } catch (e) {}
+        }
+      }
+      setQrLoading(false);
+    } catch (err) {
+      setQrLoading(false);
+      setQrError(`Connection error: ${err.message}`);
     }
   };
 
@@ -498,7 +575,38 @@ API_MODE="false"`;
                   </div>
                   <div className="relative">
                     <span className="bg-[#121217] px-3 text-[11px] font-mono text-zinc-500">
-                      Select Connection Method
+                      Step 1 — Enter your phone number
+                    </span>
+                  </div>
+                </div>
+
+                {/* Phone number input — shared for both QR and pairing code */}
+                <div className="mb-5">
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-zinc-500">
+                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path>
+                      </svg>
+                    </div>
+                    <input 
+                      type="tel"
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      placeholder="e.g. 212612345678 (country code + number)"
+                      className="w-full bg-[#0c0c10] border border-zinc-800 rounded-xl pl-10 pr-4 py-3 text-sm text-white font-mono placeholder-zinc-600 focus:outline-none focus:border-red-500"
+                    />
+                  </div>
+                  <p className="text-[11px] font-mono text-zinc-500 mt-1.5">🇲🇦 Morocco: 2126XXXXXXXX or 2127XXXXXXXX (no leading 0)</p>
+                </div>
+
+                {/* Step 2 divider */}
+                <div className="relative mb-5 text-center">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-zinc-800"></div>
+                  </div>
+                  <div className="relative">
+                    <span className="bg-[#121217] px-3 text-[11px] font-mono text-zinc-500">
+                      Step 2 — Choose connection method
                     </span>
                   </div>
                 </div>
@@ -507,7 +615,14 @@ API_MODE="false"`;
                 <div className="grid grid-cols-2 gap-3.5 mb-7">
                   {/* QR Code Card */}
                   <button 
-                    onClick={() => setShowQrModal(true)}
+                    onClick={() => {
+                      if (!phone.replace(/[^0-9]/g, '') || phone.replace(/[^0-9]/g, '').length < 9) {
+                        alert('Please enter your phone number first (Step 1)');
+                        return;
+                      }
+                      setQrImage(''); setQrError(''); setQrStatus(''); setQrLoading(false);
+                      setShowQrModal(true);
+                    }}
                     className="p-5 rounded-2xl bg-[#20202a] hover:bg-[#272734] border border-zinc-800/80 text-left transition flex items-center gap-4 group cursor-pointer"
                   >
                     <div className="text-zinc-400 group-hover:text-white transition shrink-0">
@@ -527,7 +642,12 @@ API_MODE="false"`;
                   {/* Pairing Code Card */}
                   <button 
                     onClick={() => {
+                      if (!phone.replace(/[^0-9]/g, '') || phone.replace(/[^0-9]/g, '').length < 9) {
+                        alert('Please enter your phone number first (Step 1)');
+                        return;
+                      }
                       setPairCode('');
+                      setPairError('');
                       setShowPairModal(true);
                     }}
                     className="p-5 rounded-2xl bg-[#20202a] hover:bg-[#272734] border border-zinc-800/80 text-left transition flex items-center gap-4 group cursor-pointer"
@@ -589,42 +709,26 @@ API_MODE="false"`;
                 </button>
               </div>
 
-              {!pairCode ? (
-                /* STEP 1: ENTER PHONE NUMBER */
+              {!pairCode && !loading ? (
+                /* STEP 1: REQUEST CODE (phone already entered on main page) */
                 <div className="space-y-4">
-                  <div>
-                    <h4 className="text-sm font-bold text-white font-mono mb-1">Enter Phone Number</h4>
-                    <p className="text-xs text-zinc-400 font-mono">WhatsApp will generate a unique pairing code.</p>
-                  </div>
-
-                  <div className="relative">
-                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-zinc-500">
-                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <div className="text-center">
+                    <div className="w-14 h-14 mx-auto rounded-2xl bg-[#1c1c24] border border-zinc-700/80 flex items-center justify-center mb-3">
+                      <svg className="w-7 h-7 text-zinc-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                         <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path>
                       </svg>
                     </div>
-                    <input 
-                      type="tel"
-                      value={phone}
-                      onChange={(e) => setPhone(e.target.value)}
-                      placeholder="e.g. 212612345678 (no leading 0)"
-                      className="w-full bg-[#0c0c10] border border-zinc-800 rounded-xl pl-10 pr-4 py-3 text-sm text-white font-mono placeholder-zinc-600 focus:outline-none focus:border-red-500"
-                    />
+                    <h4 className="text-base font-bold text-white font-mono mb-1">Ready to Link</h4>
+                    <p className="text-xs text-zinc-400 font-mono">Phone: <span className="text-[#38bdf8] font-bold">{phone || '—'}</span></p>
+                    <p className="text-[11px] text-zinc-500 font-mono mt-1">WhatsApp will generate a unique 8-character code.</p>
                   </div>
 
                   <button 
                     onClick={handleRequestPairing}
                     disabled={loading}
-                    className="w-full py-3 px-4 rounded-xl bg-[#1c1c24] hover:bg-[#242430] border border-zinc-700/80 text-white font-mono text-sm font-semibold transition flex items-center justify-center gap-2 cursor-pointer"
+                    className="w-full py-3.5 px-4 rounded-xl bg-red-600 hover:bg-red-500 text-white font-mono text-sm font-semibold transition flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-red-900/20"
                   >
-                    {loading ? (
-                      <>
-                        <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
-                        <span>Generating Code… (3-5s)</span>
-                      </>
-                    ) : (
-                      'Get Pairing Code'
-                    )}
+                    Get Pairing Code
                   </button>
 
                   {pairError && (
@@ -633,48 +737,55 @@ API_MODE="false"`;
                     </div>
                   )}
 
-                  {/* How it works Divider */}
-                  <div className="relative my-4 text-center">
-                    <div className="absolute inset-0 flex items-center">
-                      <div className="w-full border-t border-zinc-800"></div>
-                    </div>
-                    <div className="relative">
-                      <span className="bg-[#121217] px-3 text-[11px] font-mono text-zinc-500">
-                        How it works
-                      </span>
-                    </div>
+                  {/* How it works */}
+                  <div className="relative my-3 text-center">
+                    <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-zinc-800"></div></div>
+                    <div className="relative"><span className="bg-[#121217] px-3 text-[11px] font-mono text-zinc-500">How it works</span></div>
                   </div>
 
                   <div className="space-y-2.5 text-xs font-mono text-zinc-300">
-                    <div className="flex items-center gap-3">
-                      <div className="w-5 h-5 rounded-md bg-[#1c1c24] border border-zinc-700/80 flex items-center justify-center font-bold text-[11px] text-white shrink-0">1</div>
-                      <span>Include your country code</span>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <div className="w-5 h-5 rounded-md bg-[#1c1c24] border border-zinc-700/80 flex items-center justify-center font-bold text-[11px] text-white shrink-0">2</div>
-                      <span>Click &quot;Get Pairing Code&quot;</span>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <div className="w-5 h-5 rounded-md bg-[#1c1c24] border border-zinc-700/80 flex items-center justify-center font-bold text-[11px] text-white shrink-0">3</div>
-                      <span>Open the WhatsApp notification</span>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <div className="w-5 h-5 rounded-md bg-[#1c1c24] border border-zinc-700/80 flex items-center justify-center font-bold text-[11px] text-white shrink-0">4</div>
-                      <span>Enter the code on your phone</span>
-                    </div>
+                    {['Go to Linked Devices in Settings', 'Tap "Link with phone instead"', 'Enter the 8-character code shown'].map((s, i) => (
+                      <div key={i} className="flex items-center gap-3">
+                        <div className="w-5 h-5 rounded-md bg-[#1c1c24] border border-zinc-700/80 flex items-center justify-center font-bold text-[11px] text-white shrink-0">{i+1}</div>
+                        <span>{s}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
+              ) : loading && !pairCode ? (
+                /* LOADING STATE */
+                <div className="flex flex-col items-center justify-center gap-4 py-8">
+                  <span className="w-10 h-10 border-3 border-red-500 border-t-transparent rounded-full animate-spin" style={{borderWidth:'3px'}}></span>
+                  <div className="text-center">
+                    <p className="text-sm font-bold text-white font-mono">Generating Code…</p>
+                    <p className="text-xs text-zinc-400 font-mono mt-1">Connecting to WhatsApp servers (3-5s)</p>
+                  </div>
+                  {pairError && (
+                    <div className="p-3 bg-red-950/40 border border-red-900/50 rounded-xl text-xs font-mono text-red-300 w-full">
+                      {pairError}
+                    </div>
+                  )}
+                </div>
               ) : (
-                /* STEP 2: DISPLAY PAIRING CODE (Matches Screenshot 1 Exactly) */
+                /* STEP 2: DISPLAY PAIRING CODE — Levanter style */
                 <div className="space-y-5 text-center animate-fade-in">
                   <div>
                     <h4 className="text-xl font-bold text-white font-mono mb-1">Your Pairing Code</h4>
                     <p className="text-xs text-zinc-400 font-mono">Enter this on your mobile device</p>
                   </div>
 
-                  {/* Large Box with Spaced Glowing Electric Blue Characters */}
-                  <div className="bg-[#0c0c10] border border-zinc-800/90 rounded-2xl py-7 px-4 shadow-inner">
-                    <span className="text-2xl sm:text-4xl font-extrabold font-mono text-[#38bdf8] tracking-[0.25em] inline-block drop-shadow-[0_0_15px_rgba(56,189,248,0.4)] select-all">
+                  {/* Large Code Box — big spaced glowing letters like Levanter */}
+                  <div className="bg-[#0c0c10] border border-zinc-800/90 rounded-2xl py-8 px-4 shadow-inner relative overflow-hidden">
+                    <div className="absolute inset-0 bg-gradient-to-b from-[#38bdf8]/3 to-transparent pointer-events-none"></div>
+                    <span
+                      className="font-extrabold font-mono text-[#38bdf8] select-all block"
+                      style={{
+                        fontSize: 'clamp(1.8rem, 8vw, 2.6rem)',
+                        letterSpacing: '0.3em',
+                        textShadow: '0 0 20px rgba(56,189,248,0.5), 0 0 40px rgba(56,189,248,0.2)',
+                        lineHeight: 1.2
+                      }}
+                    >
                       {formatCodeLetters(pairCode)}
                     </span>
                   </div>
@@ -756,16 +867,16 @@ API_MODE="false"`;
           </div>
         )}
 
-        {/* MODAL 2: LINK WITH QR CODE */}
+        {/* MODAL 2: LINK WITH QR CODE — Real Baileys QR */}
         {showQrModal && (
           <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
-            <div className="bg-[#121217] border border-zinc-800 rounded-2xl w-full max-w-xl p-6 relative shadow-2xl">
+            <div className="bg-[#121217] border border-zinc-800 rounded-2xl w-full max-w-md p-6 relative shadow-2xl">
               
               {/* Modal Header */}
-              <div className="flex items-center justify-between pb-4 border-b border-zinc-800/80 mb-5">
+              <div className="flex items-center justify-between pb-3 border-b border-zinc-800/80 mb-5">
                 <h3 className="text-sm font-bold text-white font-mono">Link with QR Code</h3>
                 <button 
-                  onClick={() => setShowQrModal(false)}
+                  onClick={() => { stopQr(); setShowQrModal(false); setQrImage(''); setQrError(''); setQrStatus(''); setQrLoading(false); }}
                   className="text-zinc-400 hover:text-white p-1 rounded-lg transition"
                 >
                   <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -775,54 +886,97 @@ API_MODE="false"`;
                 </button>
               </div>
 
-              {/* Modal Body: Left steps + Right QR */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
-                
-                <div className="space-y-3 font-mono text-xs">
-                  <h4 className="text-sm font-bold text-white mb-2">How to scan</h4>
-                  
-                  <div className="space-y-2 text-zinc-300">
-                    <div className="flex items-start gap-2">
-                      <span className="font-bold text-white">1.</span>
-                      <span>Open WhatsApp on your phone</span>
-                    </div>
-
-                    <div className="flex items-start gap-2">
-                      <span className="font-bold text-white">2.</span>
-                      <span>Tap Menu (⋮) or Settings</span>
-                    </div>
-
-                    <div className="flex items-start gap-2">
-                      <span className="font-bold text-white">3.</span>
-                      <span>Tap Linked Devices</span>
-                    </div>
-
-                    <div className="flex items-start gap-2">
-                      <span className="font-bold text-white">4.</span>
-                      <span>Tap Link a device</span>
-                    </div>
-
-                    <div className="flex items-start gap-2">
-                      <span className="font-bold text-white">5.</span>
-                      <span>Point your phone at this QR code</span>
-                    </div>
-                  </div>
-
-                  <p className="text-[11px] text-zinc-500 pt-2 border-t border-zinc-800/80">
-                    Session: <code className="text-red-400">{getComputedSessionId()}</code>
-                  </p>
-                </div>
-
+              <div className="space-y-4">
+                {/* QR Display Area */}
                 <div className="flex justify-center">
-                  <div className="bg-white p-4 rounded-2xl shadow-xl flex items-center justify-center">
-                    <img 
-                      src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&margin=0&data=ADAM_BOT_SESSION_${getComputedSessionId()}`}
-                      alt="WhatsApp QR Code"
-                      className="w-48 h-48 block"
-                    />
-                  </div>
+                  {qrLoading && !qrImage && (
+                    <div className="w-52 h-52 bg-[#0c0c10] border border-zinc-800 rounded-2xl flex flex-col items-center justify-center gap-3">
+                      <span className="w-8 h-8 border-2 border-red-500 border-t-transparent rounded-full animate-spin"></span>
+                      <p className="text-xs font-mono text-zinc-400 text-center px-4">{qrStatus || 'Connecting...'}</p>
+                    </div>
+                  )}
+                  {qrImage && (
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="bg-white p-3 rounded-2xl shadow-xl">
+                        <img src={qrImage} alt="WhatsApp QR Code" className="w-48 h-48 block" />
+                      </div>
+                      <p className="text-xs font-mono text-emerald-400">📱 Scan with WhatsApp now</p>
+                      <p className="text-[11px] font-mono text-zinc-500 text-center">QR expires in ~60 seconds. Keep this tab open.</p>
+                    </div>
+                  )}
+                  {qrStatus && qrStatus.includes('FINALIZING') && (
+                    <div className="w-52 h-52 bg-[#0c0c10] border border-emerald-800/60 rounded-2xl flex flex-col items-center justify-center gap-3">
+                      <span className="text-3xl">✅</span>
+                      <p className="text-xs font-mono text-emerald-400 text-center px-4">{qrStatus}</p>
+                    </div>
+                  )}
+                  {!qrLoading && !qrImage && !qrStatus.includes('FINALIZING') && (
+                    <div className="w-52 h-52 bg-[#0c0c10] border border-zinc-800 rounded-2xl flex flex-col items-center justify-center gap-3">
+                      <svg className="w-12 h-12 text-zinc-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                        <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+                        <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+                        <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
+                        <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+                      </svg>
+                      <p className="text-[11px] font-mono text-zinc-500 text-center px-4">Click &quot;Generate QR&quot; to get started</p>
+                    </div>
+                  )}
                 </div>
 
+                {/* Error */}
+                {qrError && (
+                  <div className="p-3 bg-red-950/40 border border-red-900/50 rounded-xl text-xs font-mono text-red-300 flex items-start gap-2">
+                    <span>⚠️</span>
+                    <span>{qrError}</span>
+                  </div>
+                )}
+
+                {/* Generate / Refresh Button */}
+                {!qrImage && !qrStatus.includes('FINALIZING') && (
+                  <button
+                    onClick={handleStartQr}
+                    disabled={qrLoading}
+                    className="w-full py-3 px-4 rounded-xl bg-[#1c1c24] hover:bg-[#242430] border border-zinc-700/80 text-white font-mono text-sm font-semibold transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {qrLoading ? (
+                      <>
+                        <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                        <span>Generating QR…</span>
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+                          <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+                          <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
+                          <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+                        </svg>
+                        <span>{qrError ? 'Try Again' : 'Generate QR Code'}</span>
+                      </>
+                    )}
+                  </button>
+                )}
+
+                {/* Refresh button when QR is showing */}
+                {qrImage && (
+                  <button
+                    onClick={() => { stopQr(); setQrImage(''); setQrError(''); setTimeout(handleStartQr, 300); }}
+                    className="w-full py-2.5 px-4 rounded-xl bg-zinc-800/60 hover:bg-zinc-700/60 border border-zinc-700/50 text-zinc-300 font-mono text-xs font-semibold transition flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    🔄 Refresh QR
+                  </button>
+                )}
+
+                {/* How to scan steps */}
+                <div className="space-y-2 text-xs font-mono text-zinc-400 border-t border-zinc-800/60 pt-4">
+                  <p className="text-zinc-300 font-semibold mb-2">How to scan:</p>
+                  {['Open WhatsApp → Settings', 'Tap Linked Devices', 'Tap Link a Device', 'Point camera at QR code'].map((step, i) => (
+                    <div key={i} className="flex items-center gap-2.5">
+                      <div className="w-5 h-5 rounded-md bg-[#1c1c24] border border-zinc-700/80 flex items-center justify-center font-bold text-[11px] text-white shrink-0">{i+1}</div>
+                      <span>{step}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
 
             </div>
