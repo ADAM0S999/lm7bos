@@ -53,7 +53,7 @@
     "node-gtts": "^2.0.1",
     "@google/generative-ai": "^0.15.0",
     "groq-sdk": "^0.5.0",
-    "openai": "^4.52.0",
+    "openai": "^7.60.0",
     "rate-limiter-flexible": "^5.0.3",
     "next": "^14.2.5",
     "react": "^18.3.1",
